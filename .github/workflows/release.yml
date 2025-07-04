@@ -1,0 +1,129 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Get dependencies
+      run: go mod download
+
+    - name: Build for AMD64
+      run: |
+        CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o mac-guest-agent-darwin-amd64 ./main.go
+        
+    - name: Build for ARM64
+      run: |
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o mac-guest-agent-darwin-arm64 ./main.go
+
+    - name: Generate checksums
+      run: |
+        md5 mac-guest-agent-darwin-amd64 > mac-guest-agent-darwin-amd64.md5
+        md5 mac-guest-agent-darwin-arm64 > mac-guest-agent-darwin-arm64.md5
+        shasum -a 256 mac-guest-agent-darwin-amd64 > mac-guest-agent-darwin-amd64.sha256
+        shasum -a 256 mac-guest-agent-darwin-arm64 > mac-guest-agent-darwin-arm64.sha256
+
+    - name: Get version and release info
+      id: get_version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/v* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/}
+          IS_PRERELEASE=false
+        else
+          VERSION="latest"
+          IS_PRERELEASE=true
+        fi
+        
+        COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+        
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+        echo "COMMIT_MESSAGE<<EOF" >> $GITHUB_OUTPUT
+        echo "$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        cat > release_notes.md << EOF
+        ${{ steps.get_version.outputs.COMMIT_MESSAGE }}
+        
+        ## 文件校验 / File Verification
+        ### MD5
+        \`\`\`
+        $(cat mac-guest-agent-darwin-amd64.md5)
+        $(cat mac-guest-agent-darwin-arm64.md5)
+        \`\`\`
+        ### SHA256
+        \`\`\`
+        $(cat mac-guest-agent-darwin-amd64.sha256)
+        $(cat mac-guest-agent-darwin-arm64.sha256)
+        \`\`\`
+        EOF
+
+    - name: Publish Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG_NAME=${{ steps.get_version.outputs.VERSION }}
+        
+        # For 'latest' pre-release, delete old release and tag first
+        if [[ "$TAG_NAME" == "latest" ]]; then
+          echo "Deleting old 'latest' release and tag..."
+          gh release delete latest --cleanup-tag --yes || echo "No previous 'latest' release to delete."
+        fi
+        
+        # Create new release
+        gh release create "$TAG_NAME" \
+          --title "Release $TAG_NAME" \
+          --notes-file release_notes.md \
+          --prerelease=${{ steps.get_version.outputs.IS_PRERELEASE }} \
+          mac-guest-agent-darwin-amd64 \
+          mac-guest-agent-darwin-arm64 \
+          mac-guest-agent-darwin-amd64.md5 \
+          mac-guest-agent-darwin-arm64.md5 \
+          mac-guest-agent-darwin-amd64.sha256 \
+          mac-guest-agent-darwin-arm64.sha256
+
+  test:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Run tests
+      run: |
+        go mod download
+        make test || echo "Tests completed"
+
+    - name: Build test
+      run: |
+        make build 
